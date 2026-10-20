@@ -282,7 +282,9 @@ function apply(ctx, cfg) {
 
       logger.info(
         '[下载] 桥返回成功 《' + res.title + '》第' + res.index + '话 ' +
-          res.pages + '页 ' + res.sizeMB + 'MB 耗时' + res.elapsed + 's',
+          res.pages + '页 ' + res.sizeMB + 'MB 耗时' + res.elapsed + 's' +
+          (res.recovered ? ' 补页' + res.recovered : '') +
+          (res.missingPages ? ' 仍缺' + res.missingPages + '页' : ''),
       )
 
       if (res.oversize) {
@@ -365,10 +367,14 @@ function apply(ctx, cfg) {
 
       await fs.rm(workDir, { recursive: true, force: true }).catch(() => {})
 
+      // 缺页提示：补页也补不回来的少数页，如实告知，避免用户以为拿到了完整版
+      const missNote = res.missingPages
+        ? '（其中 ' + res.missingPages + ' 页下载失败已跳过）'
+        : ''
       if (single) {
-        return '《' + res.title + '》已发送（' + res.sizeMB + ' MB，' + res.pages + ' 页）'
+        return '《' + res.title + '》已发送（' + res.sizeMB + ' MB，' + res.pages + ' 页）' + missNote
       }
-      return '《' + res.title + '》第 ' + res.index + ' 话 已发送（' + res.sizeMB + ' MB，' + res.pages + ' 页）'
+      return '《' + res.title + '》第 ' + res.index + ' 话 已发送（' + res.sizeMB + ' MB，' + res.pages + ' 页）' + missNote
     } catch (e) {
       logger.warn('[下载] 异常 ' + albumId + '-' + chapter + ': ' + (e && e.message))
       return '下载失败：' + (e && e.message)

@@ -12,6 +12,7 @@
 - [PDF 体积控制](#pdf-体积控制)
 - [网络与 SSL](#网络与-ssl)
 - [APP API](#app-api)
+- [部分失败与补页](#部分失败与补页)
 - [文件名降级策略](#文件名降级策略)
 - [本地文件发送](#本地文件发送)
 - [性能优化](#性能优化)
@@ -108,6 +109,47 @@ jmcomic.JmModuleConfig.FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN = False
 - **不需要登录**
 
 这是本方案能够在一般网络环境下跑通的关键前提 —— 网页版基本都会被 Cloudflare 拦截。
+
+## 部分失败与补页
+
+`jmcomic` 的 `download_photo()` 默认 `check_exception=True`，会在 `after_photo`
+（即 img2pdf 生成 PDF）**之后**调用 `raise_if_has_exception()`。只要有一张图失败，
+就抛 `PartialDownloadFailedException`。
+
+问题在于**执行顺序**：
+
+```
+photo（214 页）
+  ├─ 下载 212 页成功、2 页失败
+  ├─ after_photo → img2pdf 用这 212 张图生成了完整 PDF  ✓
+  └─ raise_if_has_exception() → 抛异常  ✗
+```
+
+结果是 **PDF 已经生成好了，但异常把成功结果掩盖了**，插件误报「下载失败」，
+什么都不发。实测遇到过：214 页的作品，113.9 MB 的 PDF 已完整落盘，
+用户却收到「下载失败：部分下载失败」。
+
+### 处理方式
+
+改为 `check_exception=False`，拿到 `DownloadResult` 后自行检查
+`downloader.download_failed_image`：
+
+1. 无失败 → 直接返回成功
+2. 有失败 → 对失败的那几张图**逐页重试**（每页最多 3 轮，间隔递增）
+3. 补回若干页 → **重新生成 PDF**（否则 PDF 里仍是缺页的旧版本）
+4. 仍有缺页 → 如实返回 `missingPages`，由插件提示用户
+
+关键点：
+
+- 补页只重下失败的那几张，不重下整章
+- 补页调用的是 `client.download_by_image_detail(image, image.save_path)`，
+  `decode_image` 默认 `True`，与首次下载一致
+- 页数用 PDF 内 `/Type /Page` 计数，且必须减去 `/Type /Pages`（页面树节点），
+  否则会多算 1
+- 重新生成 PDF 复用 `Img2pdfPlugin`，保证输出路径与首次一致
+
+实测效果：注入 2 页瞬时失败 → 补回 2 页 → 14/14 页完整，`missingPages=0`；
+注入 2 页永久失败 → 3 轮重试全败 → 如实返回 `pages=12/14, missingPages=2`。
 
 ## 文件名降级策略
 

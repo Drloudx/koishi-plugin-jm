@@ -185,8 +185,58 @@ def cmd_list(album_id):
     })
 
 
+def _count_pdf_pages(pdf_path):
+    """统计 PDF 真实页数。
+
+    直接数 '/Type /Page' 会把 '/Type /Pages'（页面树节点）也算进去，
+    所以要先减掉 /Pages 的个数。用二进制读，避免编码问题。
+    """
+    try:
+        with open(pdf_path, 'rb') as f:
+            data = f.read()
+        total = data.count(b'/Type /Page')
+        tree = data.count(b'/Type /Pages')
+        return max(0, total - tree)
+    except Exception:
+        return 0
+
+
+def _regenerate_pdf(photo, pdf_dir):
+    """用 photo 目录下现有的图片重新生成 PDF。
+
+    补页之后必须重做 PDF，否则 PDF 里仍是缺页的旧版本。
+    复用 img2pdf 的插件配置（pdf_dir / filename_rule='Pindex'），
+    直接调用 Img2pdfPlugin，保证输出路径与首次生成时一致。
+    """
+    try:
+        from jmcomic.jm_plugin import Img2pdfPlugin
+        plugin = Img2pdfPlugin
+        # 插件实例需要 option，这里用与下载时相同的 option 构造
+        opt = build_option(os.path.dirname(photo.save_path) if photo.save_path else '',
+                           pdf_dir)
+        inst = plugin(opt)
+        inst.invoke(photo=photo, pdf_dir=pdf_dir, filename_rule='Pindex')
+        return True
+    except Exception as e:
+        log('重新生成 PDF 失败: %s: %s' % (type(e).__name__, e))
+        return False
+
+
 def cmd_fetch(album_id, pindex):
-    """下载指定章节（按 pindex 定位），生成 PDF，输出路径。"""
+    """下载指定章节（按 pindex 定位），生成 PDF，输出路径。
+
+    关于「部分下载失败」（假失败问题）：
+      jmcomic 的 download_photo 默认 check_exception=True，会在 after_photo（即
+      img2pdf 生成 PDF）之后调用 raise_if_has_exception()，只要有一张图失败就抛
+      PartialDownloadFailedException —— 但此时 PDF 其实已经完整生成好了。
+      结果是：明明成功却报失败，插件什么都不发。
+
+      所以这里改为 check_exception=False，拿到 DownloadResult 后自己检查
+      downloader.download_failed_image：
+        1) 没有失败 → 直接返回成功
+        2) 有失败   → 针对失败的那几张图逐页重试（只补缺的，不重下全部）
+        3) 补完仍有缺 → 用剩余图片重新生成 PDF，并在结果里标记缺页
+    """
     work = os.environ.get('JM_WORK_DIR')
     if not work:
         raise RuntimeError('JM_WORK_DIR not set')
@@ -214,8 +264,43 @@ def cmd_fetch(album_id, pindex):
     log('downloading album=%s chapter=%s photo=%s name=%s' % (album_id, pi, pid, pname))
 
     t0 = time.time()
-    opt.download_photo(pid)
+    # check_exception=False：不让个别图片失败把整批结果废掉
+    result = opt.download_photo(pid, check_exception=False)
     elapsed = round(time.time() - t0, 1)
+
+    dler = result.downloader
+    photo = result.detail
+
+    # ---- 补页：只重下失败的那几张 ----
+    failed_imgs = list(getattr(dler, 'download_failed_image', []) or [])
+    retried = 0
+    recovered = 0
+    if failed_imgs:
+        log('部分失败 %d 张，开始逐页补下' % len(failed_imgs))
+        still_failed = []
+        for img, err in failed_imgs:
+            idx = getattr(img, 'index', '?')
+            ok = False
+            # 每页最多重试 3 轮，每轮之间稍等，避开瞬时风控
+            for attempt in range(1, 4):
+                try:
+                    client.download_by_image_detail(img, img.save_path)
+                    ok = True
+                    recovered += 1
+                    log('补页成功: 第%s页（第%d次）' % (idx, attempt))
+                    break
+                except Exception as e:
+                    log('补页失败: 第%s页 第%d次 %s' % (idx, attempt, type(e).__name__))
+                    time.sleep(attempt)
+            retried += 1
+            if not ok:
+                still_failed.append(str(idx))
+        if recovered:
+            # 有页补回来了 → 用现在完整的图片集重新生成 PDF
+            log('补回 %d 页，重新生成 PDF' % recovered)
+            _regenerate_pdf(photo, pdf_dir)
+        if still_failed:
+            log('最终仍缺页: %s' % ','.join(still_failed))
 
     # 找生成的 PDF
     pdf_path = None
@@ -229,6 +314,11 @@ def cmd_fetch(album_id, pindex):
         return
 
     size_mb = round(os.path.getsize(pdf_path) / 1024 / 1024, 2)
+    # 页数用 PDF 内真实的 /Type /Page 计数（比 split 更准，不把 /Pages 算进去）
+    pdf_pages = _count_pdf_pages(pdf_path)
+    expected = len(photo) if photo is not None else 0
+    missing = max(0, expected - pdf_pages) if expected else 0
+
     out({
         'ok': True,
         'albumId': str(album_id),
@@ -238,7 +328,10 @@ def cmd_fetch(album_id, pindex):
         'chapterName': pname,
         'pdfPath': pdf_path,
         'sizeMB': size_mb,
-        'pages': len(open(pdf_path, 'rb').read().split(b'/Type /Page')) - 1,
+        'pages': pdf_pages,
+        'expectedPages': expected,
+        'missingPages': missing,
+        'recovered': recovered,
         'elapsed': elapsed,
         'oversize': size_mb > MAX_PDF_MB,
     })
