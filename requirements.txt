@@ -1,0 +1,7 @@
+# /jm 插件所需的 Python 依赖
+# 安装：pip install -r requirements.txt
+#
+# 版本下限是按本插件实测通过的版本给的，更高的版本一般也能用。
+jmcomic>=2.7.9
+img2pdf>=0.6.3
+curl_cffi>=0.16.3

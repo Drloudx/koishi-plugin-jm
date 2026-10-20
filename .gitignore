@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+*.tgz
+package-lock.json
+
+# 下载中转目录
+temp/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# 日志与临时文件
+*.log
+*.tmp
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

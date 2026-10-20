@@ -1,0 +1,42 @@
+{
+  "name": "koishi-plugin-jm",
+  "version": "1.1.0",
+  "description": "禁漫（JMComic）按章节下载并转为 PDF 发送到群",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "jm_bridge.py",
+    "requirements.txt",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node -e \"require('fs').copyFileSync('index.js','lib/index.js')\"",
+    "check": "node --check lib/index.js",
+    "prepack": "npm run build && npm run check"
+  },
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin",
+    "jmcomic",
+    "pdf"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Drloudx/koishi-plugin-jm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Drloudx/koishi-plugin-jm/issues"
+  },
+  "homepage": "https://github.com/Drloudx/koishi-plugin-jm#readme",
+  "license": "MIT",
+  "peerDependencies": {
+    "koishi": "^4.18.0"
+  },
+  "koishi": {
+    "description": {
+      "zh": "禁漫（JMComic）按章节下载并转为 PDF 发送到群"
+    }
+  }
+}
