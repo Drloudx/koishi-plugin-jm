@@ -87,15 +87,31 @@ pip install jmcomic img2pdf curl_cffi
 
 ### 2. 安装插件
 
-```bash
-npm install koishi-plugin-jm
-```
+**方式一：从 Release 下载 tgz**（推荐，最简单）
 
-或从本地 tgz 安装：
+到 [Releases](https://github.com/Drloudx/koishi-plugin-jm/releases) 页面下载最新的 `koishi-plugin-jm-x.y.z.tgz`，然后：
 
 ```bash
 npm install ./koishi-plugin-jm-1.1.0.tgz
 ```
+
+**方式二：直接从 GitHub 安装**
+
+```bash
+npm install github:Drloudx/koishi-plugin-jm
+```
+
+需要本机装有 `git`，且能访问 GitHub。
+
+**方式三：克隆后本地安装**
+
+```bash
+git clone https://github.com/Drloudx/koishi-plugin-jm.git
+cd koishi-plugin-jm
+npm install
+```
+
+> ⚠️ 本插件目前**尚未发布到 npm**，`npm install koishi-plugin-jm` 会返回 404。
 
 ### 3. 启用插件
 

@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build and pack
+        run: |
+          npm run build
+          npm run check
+          npm pack
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.tgz'
+          generate_release_notes: true
+          body: |
+            ## 安装
+
+            ```bash
+            pip install jmcomic img2pdf curl_cffi
+            npm install ./koishi-plugin-jm-*.tgz
+            ```
+
+            然后在 `koishi.yml` 的 `plugins:` 下添加 `jm:jm001: {}` 并重启 Koishi。
+
+            详细说明见 [README](https://github.com/Drloudx/koishi-plugin-jm#readme)。
