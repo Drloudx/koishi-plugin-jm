@@ -271,11 +271,51 @@ busy.set(sessionKey, { albumId, chapter, userId, startedAt, child, cancelled })
 
 ### 取消后的处理
 
-点了停止后，子进程被杀 → `runBridge` 的 promise 会走 reject 或被 close 分支处理。
-需要靠 `task.cancelled` 标志区分「主动取消」和「真失败」，否则用户点停止后会收到
-一条「下载失败：xxx」的错误提示。取消时还要顺手删掉半截的临时目录。
+点了停止后，子进程被杀 → `runBridge` 会 **reject**（桥接脚本无输出、exit≠0）。
+这意味着 `await runBridge(...)` **直接跳进 `catch`**，写在 `await` 之后的
+`if (task.cancelled)` 判断**根本执行不到**。
+
+所以 `task.cancelled` 的判断必须放在 **`catch` 里**（放 `try` 里只覆盖「正常返回」这一条路径）：
+
+```js
+} catch (e) {
+  if (task.cancelled) {           // ← 必须在这里
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {})
+    return '已停止下载'
+  }
+  logger.warn('[下载] 异常 ...')
+  return '下载失败：' + (e && e.message)
+}
+```
+
+列表查询那个 `catch` 同理。取消时还要顺手删掉半截的临时目录。
+
+> 这个 bug 实测表现：点停止后 368ms 就结束了（说明杀进程是成功的），
+> 但用户收到的却是「下载失败：桥接脚本无输出 (exit=1)」。
 
 ### 验证方法
+
+**两层都要测**，只测其中一层会漏：
+
+1. **桥接层**（Python）：直接跑 `jm_bridge.py`，看 JSON 输出对不对
+2. **命令层**（JS）：起一个 mock `ctx` 加载插件、真的驱动 `/jm` 命令
+
+本次 `busy.set is not a function`（把 `Set` 改成 `Map` 却漏改声明）就是
+**只测了桥接层**导致的——Python 那边全绿，JS 一进命令就崩。命令层测试的最小骨架：
+
+```js
+const ctx = {
+  logger: () => logger,
+  setInterval: () => () => {},
+  middleware: () => {},   // 缺这个会报 ctx.middleware is not a function
+  command() {
+    const c = { usage(){return c}, example(){return c}, action(fn){ action = fn; return c } }
+    return c
+  },
+}
+await require('./lib/index.js').apply(ctx, cfg)
+await action({ session, ... }, '350234', undefined)
+```
 
 判定「是否真的停了」不能只看进程是否消失，要看**文件是否还在增长**：
 

@@ -224,8 +224,9 @@ function apply(ctx, cfg) {
 
   // sessionKey -> { albumId, chapters, expireAt }
   const pending = new Map()
-  // 同一群同时只允许一个下载
-  const busy = new Set()
+  // sessionKey -> { albumId, chapter, userId, startedAt, child, cancelled }
+  // 用 Map 而不是 Set：要挂子进程句柄给「jm 停止」用
+  const busy = new Map()
 
   // ---------- 定时清理 ----------
   async function cleanTemp() {
@@ -419,6 +420,13 @@ function apply(ctx, cfg) {
       }
       return '《' + res.title + '》第 ' + res.index + ' 话 已发送（' + res.sizeMB + ' MB，' + res.pages + ' 页）' + missNote
     } catch (e) {
+      // 被「jm 停止」杀进程时，runBridge 会 reject（子进程无输出），
+      // 这里必须先判 cancelled —— 否则用户点了停止却收到「下载失败」。
+      if (task.cancelled) {
+        logger.info('[下载] 用户取消 ' + albumId + '-' + chapter)
+        await fs.rm(workDir, { recursive: true, force: true }).catch(() => {})
+        return '已停止下载'
+      }
       logger.warn('[下载] 异常 ' + albumId + '-' + chapter + ': ' + (e && e.message))
       return '下载失败：' + (e && e.message)
     } finally {
@@ -584,6 +592,11 @@ function apply(ctx, cfg) {
 
         return lines.join('\n')
       } catch (e) {
+        // 同 downloadAndSend：被「jm 停止」杀掉时不要报「查询失败」
+        if (listTask.cancelled) {
+          logger.info('[列表] 用户取消 JM' + albumId)
+          return '已停止查询'
+        }
         logger.warn('[列表] 异常: ' + (e && e.message))
         return '查询失败：' + (e && e.message)
       } finally {
