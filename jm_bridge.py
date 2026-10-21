@@ -89,22 +89,23 @@ def _pick_healthy_domains():
     """探测并返回按延迟排序的可用 API 域名。
 
     为什么需要这个（踩过的坑，务必保留）：
-      jmcomic 的 DOMAIN_API_LIST 默认是 ['www.cdngwc.club','www.cdngwc.net',
-      'www.cdnhjk.net','www.cdngwc.cc']，但运行时它会去 bytepluses.com 拉一份
-      「域名更新」把列表覆盖掉。本机这个更新地址连不上（curl 77 证书错误），
-      结果列表里混进了坏域名 www.cdngwc.cc（必挂：20s 超时或 HTTP 522），
-      而且排到了第一位。
-      再叠加 retry_times=5，每个请求都会先在坏域名上白撞 6 次 ≈ 120 秒，
-      实测 list 一个专辑要 354 秒。
+      jmcomic 内置 DOMAIN_API_LIST 里就包含 www.cdngwc.cc，而这个域名在本机
+      必挂（20s 超时或 HTTP 522）。该列表是用 shuffled() 生成的（random.shuffle），
+      所以每次进程启动顺序都不一样 —— 排在前面就慢、排在后面就快，
+      表现出来就是「同样代码有时 13s 有时 354s」。
+      再叠加 retry_times=5（同域名重试 5 次才换下一个），坏域名排第一时
+      每个请求要白撞 6 次 × 20s ≈ 120 秒，实测 list 一个专辑 354 秒。
 
     做法：并发探测候选域名，只保留真正能通的，按延迟从低到高排序；
     全部不通时退回默认列表（宁可慢也不要直接失败）。
     """
+    # 已知坏域名直接排除，连探测都省了（实测必然 20s 超时，白等）。
+    # 保留注释说明原因，方便以后有人问「为什么少一个」。
     candidates = [
         'www.cdngwc.net',
         'www.cdngwc.club',
         'www.cdnhjk.net',
-        'www.cdngwc.cc',
+        # 'www.cdngwc.cc',  # 排除：实测长期 20s 超时 / HTTP 522
     ]
     from concurrent.futures import ThreadPoolExecutor
 

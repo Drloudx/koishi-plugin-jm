@@ -96,32 +96,47 @@ jmcomic.JmModuleConfig.FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN = False
 
 这两个问题曾让一个 25 页的章节从 32 秒劣化到 381 秒，务必理解。
 
-### 问题一：坏域名排在第一位
+### 问题一：坏域名混在列表里，且顺序随机
 
-关闭自动更新后，`jmcomic` 用的仍是它内置的 `DOMAIN_API_LIST`：
+`jmcomic` 内置的 `DOMAIN_API_LIST` 本身就**包含**那个连不通的域名：
 
 ```python
-['www.cdngwc.club', 'www.cdngwc.net', 'www.cdnhjk.net', 'www.cdngwc.cc']
+# jm_config.py L198，实际是用 shuffled(...) 处理的
+DOMAIN_API_LIST = shuffled('''
+    www.cdnhjk.net
+    www.cdngwc.cc      ← 实测必挂（20s 超时 / HTTP 522）
+    www.cdngwc.net
+    www.cdngwc.club
+''')
 ```
 
-实测 `www.cdngwc.cc` **连不通**（20 秒超时或 HTTP 522）。而 `request_with_retry` 的策略是
-「同一域名重试 `retry_times` 次，再换下一个域名」，默认 `retry_times=5`：
+注意 `shuffled()` 是 `random.shuffle`，**每次启动顺序都不一样**（实测 5 次加载，5 种顺序）。
+所以这不是「某个域名总在第一位」，而是：
 
-```
-每个请求 = 坏域名 × 6 次 × 20 秒 ≈ 120 秒
-```
+> **4 个域名里 1 个是坏的，而 `retry_times=5`，于是每个请求都有概率先撞上它，
+> 一撞就是 6 次 × 20 秒 ≈ 120 秒。**
 
-实测 `list` 一个专辑耗时 **354 秒**。
+这解释了两个现象：
+
+- **为什么时快时慢**：坏域名排得靠前就慢，排得靠后就快
+- **为什么同样代码昨天 13s、今天 354s**：`shuffled()` 每次进程启动重新洗牌
+
+`request_with_retry` 的策略是「同一域名重试 `retry_times` 次再换下一个域名」，默认 `retry_times=5`。
+最坏情况（坏域名排第一）：`6 × 20 秒 ≈ 120 秒/请求`，多来几个请求就上了 300 秒。
 
 **做法**：启动时并发探测候选域名，只保留真正能通的，按延迟排序后显式传给 `client.domain`，
 同时把 `retry_times` 从 5 降到 2。
 
 ```python
-'alive' → 按延迟排序 → 'client': {'domain': [...], 'retry_times': 2}
+'client': {'domain': [...], 'retry_times': 2}
 ```
 
 探测用 `/setting` 接口，超时 8 秒，只要 HTTP 状态 < 500 就算活。全部不通时退回默认列表
 （宁可慢也不要直接失败）。
+
+> 顺带说明：`www.cdngwc.cc` 不在 `DOMAIN_API_LIST` 里这种说法是**错的**——它一直在里面。
+> 关掉 `FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN` 只是不再从 `bytepluses.com` 拉「更新列表」
+> （那个地址在本机连不上），并不会把坏域名从内置列表里去掉。
 
 ### 问题二：`postman` 不复用连接（影响最大）
 
