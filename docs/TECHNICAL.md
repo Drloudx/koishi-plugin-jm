@@ -390,11 +390,66 @@ const file = src.startsWith("file:")
 
 传入本地路径时 `src` 不以 `file:` 开头，适配器会把它当作 **URL** 去 `downloadFile`，必然失败（日志中表现为 `download_file ... retcode: 100`）。
 
+### 群聊与私聊是两套接口
+
+`session.channelId` 的含义随会话类型变化：
+
+| 会话 | `channelId` 形如 | 应调用的接口 |
+| --- | --- | --- |
+| 群聊 | `1011580076`（群号） | `upload_group_file` → `internal.uploadGroupFile(groupId, file, name)` |
+| 私聊 | `private:1965161643` | `upload_private_file` → `internal.uploadPrivateFile(userId, file, name)` |
+
+**踩过的坑**：早期 `sendPdf()` 不区分两者，私聊时把 `"private:1965161643"` 当成群号传给
+`upload_group_file`，被 QQ 以 `retcode: 1400` 拒绝。而随后的降级又静默失败，最终
+**用户什么都没收到，日志却打了「完成」**。
+
+判据用 `session.isDirect`（适配器内部也是这么判的），前缀匹配只作兜底：
+
+```js
+function isDirectSession(session) {
+  if (session.isDirect) return true
+  return String(session.channelId || '').startsWith('private:')
+}
+```
+
+注意私聊要**去掉 `private:` 前缀**再当 `user_id` 传：
+
+```js
+const userId = cid.startsWith('private:') ? cid.slice('private:'.length) : String(session.userId)
+```
+
+### ⚠️ `session.send()` 会吞掉所有异常
+
+Koishi 的 `Session.send()` 内部是：
+
+```js
+async send(fragment, options = {}) {
+  const elements = h.normalize(fragment)
+  if (!elements.length) return
+  return this.bot.sendMessage(...).catch((error) => {
+    logger.warn(error)      // ← 只打一条 warn
+    return []               // ← 永远不抛
+  })
+}
+```
+
+所以**用 `session.send()` 发文件，永远无法判断到底发没发出去** —— 失败时它不抛异常，
+`await` 正常返回，代码就会当成成功。这正是「回复已发送但用户收不到」的根源。
+
+要拿到真实结果必须调 `bot.sendMessage()`：
+
+```js
+const elements = h.normalize(h.file('file:///' + pdfPath, { title: name }))
+await session.bot.sendMessage(session.channelId, elements, session.event?.referrer)  // 会抛
+```
+
 ### 不允许静默失败
 
 早期版本在兜底分支抛出的异常被外层 `catch` 吞掉后，代码继续执行到成功路径，导致**上传失败却回复「已发送」**。
 
 现在的实现要求：兜底分支单独 try/catch 并设置 `sent` 标志，最后统一判断 —— 失败必须如实返回错误信息。
+
+验证时三条路径都要测到：**上传成功** / **上传失败但附件成功** / **两者都失败（必须报错）**。
 
 ## 性能优化
 

@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-jm",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "禁漫（JMComic）按章节下载并转为 PDF 发送到群",
   "main": "lib/index.js",
   "files": [
