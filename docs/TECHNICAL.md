@@ -445,6 +445,39 @@ client.get_photo_detail(pid, False, False)
 
 ## Koishi 插件约定
 
+### 「静默」返回什么？
+
+想让命令**什么都不回复**，返回**空串 `''`** 是安全的，实测链路：
+
+```
+action 返回 ''  →  h.normalize('') 得到 0 个元素  →  session.send() 里 `if (!elements.length) return`
+```
+
+即**不会发出任何消息，也不会进 Koishi 的「未响应」告警分支**，日志干净。
+
+⚠️ 注意 `cosmokit` 的 `isNullable('')` 是 **`false`**（只有 `undefined`/`null` 才为 true），
+所以别以为「返回空串 = 没返回」；但在 `session.send()` 这一层空串会被正确吞掉。
+
+### 群白名单：别用 channelId 判断是不是群
+
+私聊时 `session.channelId` 是**用户 QQ 号**，也是纯数字。用 `channelId` 做群判断会把私聊
+误伤成「群」并被白名单拦掉。
+
+正确判据是 **`session.guildId`**：群聊才有 `guildId`，私聊没有。
+
+```js
+if (!session.guildId) return true        // 私聊放行
+return ids.includes(String(session.guildId))   // 群聊按群号比对
+```
+
+白名单还要覆盖**两条入口**，否则会漏：
+
+1. 命令 `.action()` —— `jm 350234`
+2. `ctx.middleware()` —— 列表发出后用户回复的裸数字 `1`
+
+middleware 那条记得用 `return next()` 放行（别的插件可能还要处理这条消息），
+而不是 `return ''`。
+
 ### Config 必须是 Schema
 
 ```js
