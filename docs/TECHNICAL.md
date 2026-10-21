@@ -11,8 +11,10 @@
 - [图片解密](#图片解密)
 - [PDF 体积控制](#pdf-体积控制)
 - [网络与 SSL](#网络与-ssl)
+- [域名与连接复用](#域名与连接复用性能关键)
 - [APP API](#app-api)
 - [部分失败与补页](#部分失败与补页)
+- [停止下载](#停止下载)
 - [文件名降级策略](#文件名降级策略)
 - [本地文件发送](#本地文件发送)
 - [性能优化](#性能优化)
@@ -88,6 +90,64 @@ jmcomic.JmModuleConfig.FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN = False
 
 `jmcomic` 会定期从 `bytepluses.com` 拉取新域名。该地址在部分网络环境下不可达，不关闭会导致启动阶段长时间阻塞。
 
+**但仅仅关闭是不够的**，见下节。
+
+## 域名与连接复用（性能关键）
+
+这两个问题曾让一个 25 页的章节从 32 秒劣化到 381 秒，务必理解。
+
+### 问题一：坏域名排在第一位
+
+关闭自动更新后，`jmcomic` 用的仍是它内置的 `DOMAIN_API_LIST`：
+
+```python
+['www.cdngwc.club', 'www.cdngwc.net', 'www.cdnhjk.net', 'www.cdngwc.cc']
+```
+
+实测 `www.cdngwc.cc` **连不通**（20 秒超时或 HTTP 522）。而 `request_with_retry` 的策略是
+「同一域名重试 `retry_times` 次，再换下一个域名」，默认 `retry_times=5`：
+
+```
+每个请求 = 坏域名 × 6 次 × 20 秒 ≈ 120 秒
+```
+
+实测 `list` 一个专辑耗时 **354 秒**。
+
+**做法**：启动时并发探测候选域名，只保留真正能通的，按延迟排序后显式传给 `client.domain`，
+同时把 `retry_times` 从 5 降到 2。
+
+```python
+'alive' → 按延迟排序 → 'client': {'domain': [...], 'retry_times': 2}
+```
+
+探测用 `/setting` 接口，超时 8 秒，只要 HTTP 状态 < 500 就算活。全部不通时退回默认列表
+（宁可慢也不要直接失败）。
+
+### 问题二：`postman` 不复用连接（影响最大）
+
+`jmcomic` 的 postman 有两个容易混淆的取值：
+
+| 配置值 | 实现类 | 行为 |
+| --- | --- | --- |
+| `curl_cffi` | `CurlCffiPostman` | 调用**模块级** `curl_cffi.requests.get()`，**每次新建连接** |
+| `curl_cffi_session` | `CurlCffiSessionPostman` | 持有 `Session`，**连接池复用** |
+
+默认配置给的是 `curl_cffi`，意味着**每张图片都要重新握手**。实测单次冷连接固定吃
+6~21 秒（TLS 握手 + 代理链路），连接一旦复用后续每张仅 0.35~0.66 秒。
+
+同一批图片的对比：
+
+| postman | 建连 | `get_photo_detail` | 连取 8 张图 |
+| --- | --- | --- | --- |
+| `curl_cffi` | 6.75s | 21.96s | **59.28s（7.41s/张）** |
+| `curl_cffi_session` | 0.00s | 6.79s | **10.44s（1.30s/张）** |
+
+**必须用 `curl_cffi_session`。** 它把「每张图付一次握手」变成「整个任务只付一次」，
+实测 25 页章节的下载耗时 381.7s → 10.5s。
+
+这也解释了为什么同样的代码「有时快有时慢」：**网络好时握手快，网络差时握手慢，
+而旧配置把这个波动乘以了页数**。
+
 ## APP API
 
 客户端配置使用 `impl: 'api'`，即移动端接口：
@@ -150,6 +210,71 @@ photo（214 页）
 
 实测效果：注入 2 页瞬时失败 → 补回 2 页 → 14/14 页完整，`missingPages=0`；
 注入 2 页永久失败 → 3 轮重试全败 → 如实返回 `pages=12/14, missingPages=2`。
+
+## 停止下载
+
+### 为什么不能直接 `child.kill()`
+
+插件用 `spawn` 起 Python 桥接脚本，而 Python 内部还有下载线程池（`threading.image = 16`）。
+Node 的 `child.kill()` 在 Windows 上**只结束 `python.exe` 本身**，它派生的线程/子进程可能
+变成孤儿继续占用网络和临时目录。
+
+实测：执行 `child.kill()` 前后各查一次进程，能从 2 个进程清到 0 个——但这依赖进程处于
+「尚未真正进入下载」的状态。一旦进入多线程下载，就必须按进程树处理。
+
+### 做法
+
+Windows 上用 `taskkill /pid <pid> /T /F`，其中 `/T` 是「连子进程一起杀」：
+
+```js
+function killTree(child) {
+  if (!child || child.killed) return
+  const pid = child.pid
+  try {
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
+        windowsHide: true, stdio: 'ignore',
+      })
+    } else {
+      try { process.kill(-pid, 'SIGKILL') } catch { child.kill('SIGKILL') }
+    }
+  } catch {}
+}
+```
+
+非 Windows 用 `detached: true` + 负 PID 杀整个进程组。
+
+### 任务登记
+
+`busy` 从 `Set` 改成 `Map`，把子进程句柄挂到任务上，`/jm 停止` 才找得到它：
+
+```js
+busy.set(sessionKey, { albumId, chapter, userId, startedAt, child, cancelled })
+```
+
+列表查询阶段同样登记（网络差时列表查询也能跑几百秒），所以那个阶段也能停。
+
+### 取消后的处理
+
+点了停止后，子进程被杀 → `runBridge` 的 promise 会走 reject 或被 close 分支处理。
+需要靠 `task.cancelled` 标志区分「主动取消」和「真失败」，否则用户点停止后会收到
+一条「下载失败：xxx」的错误提示。取消时还要顺手删掉半截的临时目录。
+
+### 验证方法
+
+判定「是否真的停了」不能只看进程是否消失，要看**文件是否还在增长**：
+
+```
+download active: 2.86 MB @ 25.0s
+killTree() issued
+  +2s: 3.35 MB   ← 已发出的请求正在落盘（缓冲）
+  +4s: 3.35 MB
+  +8s: 3.35 MB   ← 零增长 → 真的停了
+```
+
+⚠️ **必须跳过 kill 后头 2 秒再判定**。第一次测试时用「kill 后是否增长」直接判定，
+得到了 2334 KB 的增长并误判为 FAIL，实际那是进程被杀的瞬间、已经下发的请求在落盘，
+2 秒后就完全静止了。
 
 ## 文件名降级策略
 

@@ -85,6 +85,73 @@ def log(msg):
     sys.stderr.flush()
 
 
+def _pick_healthy_domains():
+    """探测并返回按延迟排序的可用 API 域名。
+
+    为什么需要这个（踩过的坑，务必保留）：
+      jmcomic 的 DOMAIN_API_LIST 默认是 ['www.cdngwc.club','www.cdngwc.net',
+      'www.cdnhjk.net','www.cdngwc.cc']，但运行时它会去 bytepluses.com 拉一份
+      「域名更新」把列表覆盖掉。本机这个更新地址连不上（curl 77 证书错误），
+      结果列表里混进了坏域名 www.cdngwc.cc（必挂：20s 超时或 HTTP 522），
+      而且排到了第一位。
+      再叠加 retry_times=5，每个请求都会先在坏域名上白撞 6 次 ≈ 120 秒，
+      实测 list 一个专辑要 354 秒。
+
+    做法：并发探测候选域名，只保留真正能通的，按延迟从低到高排序；
+    全部不通时退回默认列表（宁可慢也不要直接失败）。
+    """
+    candidates = [
+        'www.cdngwc.net',
+        'www.cdngwc.club',
+        'www.cdnhjk.net',
+        'www.cdngwc.cc',
+    ]
+    from concurrent.futures import ThreadPoolExecutor
+
+    def probe(domain):
+        t0 = time.time()
+        try:
+            # 用轻量接口探活，超时给短一点，别让探测本身变成瓶颈
+            r = cffi_req.get('https://%s/setting' % domain,
+                             verify=False, timeout=8)
+            # 只要有 HTTP 响应就算活（/setting 可能返回 200 或 4xx，都比超时强）
+            if r.status_code < 500:
+                return (time.time() - t0, domain)
+        except Exception:
+            pass
+        return None
+
+    alive = []
+    try:
+        with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+            for res in pool.map(probe, candidates):
+                if res:
+                    alive.append(res)
+    except Exception as e:
+        log('域名探测异常: %s' % e)
+
+    if not alive:
+        log('域名探测全部失败，退回默认列表')
+        return []
+
+    alive.sort()
+    domains = [d for _, d in alive]
+    log('可用域名（按延迟）: %s' % ', '.join(
+        '%s(%.1fs)' % (d, t) for t, d in alive))
+    return domains
+
+
+# 进程内缓存：一次调用只探测一次（list 和 fetch 各自一个进程）
+_DOMAIN_CACHE = []
+
+
+def api_domains():
+    global _DOMAIN_CACHE
+    if not _DOMAIN_CACHE:
+        _DOMAIN_CACHE = _pick_healthy_domains()
+    return _DOMAIN_CACHE
+
+
 def build_option(base_dir, pdf_dir):
     """构造 JmOption。注意用 construct 而不是 default()，否则 plugins 配置会被忽略。"""
     option_dict = {
@@ -96,8 +163,18 @@ def build_option(base_dir, pdf_dir):
         },
         'client': {
             'impl': 'api',
-            'domain': [],
-            'postman': {'type': 'curl_cffi', 'meta_data': {'impersonate': 'chrome'}},
+            # 显式指定可用域名，避免自动更新塞进坏域名（见 _pick_healthy_domains）
+            'domain': api_domains(),
+            # 重试次数从默认 5 降到 2：坏域名修掉后不需要那么多重试，
+            # 而 5 次重试遇到持续故障会白等很久
+            'retry_times': 2,
+            # 必须用 curl_cffi_session（会话复用），不能用 curl_cffi：
+            #   'curl_cffi' 走 CurlCffiPostman，调用的是模块级 curl_cffi.requests.get()，
+            #   每次请求都新建连接 —— 实测每张图固定吃 6~21 秒握手开销。
+            #   'curl_cffi_session' 走 CurlCffiSessionPostman，持有一个 Session，
+            #   连接池复用，连取 8 张图 59.28s → 10.44s（快 5.7 倍）。
+            'postman': {'type': 'curl_cffi_session',
+                        'meta_data': {'impersonate': 'chrome'}},
         },
         'plugins': {
             'valid': 'log',
@@ -116,8 +193,11 @@ def build_list_option():
     return jmcomic.JmOption.construct({
         'client': {
             'impl': 'api',
-            'domain': [],
-            'postman': {'type': 'curl_cffi', 'meta_data': {'impersonate': 'chrome'}},
+            'domain': api_domains(),
+            'retry_times': 2,
+            # 同 build_option：会话复用能省掉每次请求的冷连接开销
+            'postman': {'type': 'curl_cffi_session',
+                        'meta_data': {'impersonate': 'chrome'}},
         },
     })
 
